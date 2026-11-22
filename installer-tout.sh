@@ -11,7 +11,8 @@
 # (par exemple /root/fichiers). S'il en manque un, il est téléchargé
 # depuis le dépôt GitHub.
 #
-# Usage : sudo bash installer-tout.sh
+# Usage : sudo bash installer-tout.sh          # demande le nom (défaut : pve1)
+#         sudo bash installer-tout.sh pve2     # nom donné directement
 # Suivi après le redémarrage : journalctl -fu proxmox-installer-tout
 #                             ou tail -f /var/log/proxmox-installer-tout.log
 
@@ -38,7 +39,8 @@ S1_SERVICE="proxmox-aws-complet.service"
 # Paramètres transmis au premier script
 export AUTO_REBOOT="yes"
 export REQUIRE_KVM="${REQUIRE_KVM:-no}"     # pas bloquant sans virtualisation imbriquée
-export PVE_FQDN="${PVE_FQDN:-$(hostname -s).lab.local}"
+PVE_DOMAIN="${PVE_DOMAIN:-lab.local}"
+DEFAULT_NODE_NAME="pve1"
 
 mkdir -p "$STATE_DIR" "$WORK_DIR"
 touch "$LOG_FILE"; chmod 600 "$LOG_FILE"
@@ -104,6 +106,39 @@ remove_suite_service() {
 }
 
 # -----------------------------------------------------------------------------
+# Nom du nœud : à fixer AVANT d'installer Proxmox. Le changer après crée
+# un nœud fantôme et casse les certificats (erreur 596 dans l'interface).
+# -----------------------------------------------------------------------------
+choose_node_name() {
+    local name="${1:-}"
+
+    if [[ -z "$name" ]]; then
+        if [[ -t 0 ]]; then
+            read -r -p "Nom du nœud Proxmox [${DEFAULT_NODE_NAME}] : " name
+        fi
+        name="${name:-$DEFAULT_NODE_NAME}"
+    fi
+
+    [[ "$name" =~ ^[a-z][a-z0-9-]{0,62}$ ]] \
+        || die "Nom invalide : « ${name} » (minuscules, chiffres et tirets, ex. pve1)."
+
+    if command -v pvesh >/dev/null && [[ "$(hostname -s)" != "$name" ]]; then
+        die "Proxmox est déjà installé sous le nom « $(hostname -s) ». Le renommer casserait le nœud : installez sur une instance neuve."
+    fi
+
+    export PVE_FQDN="${name}.${PVE_DOMAIN}"
+    log "Nom du nœud : ${name} (${PVE_FQDN})"
+
+    # Fixe le nom tout de suite et empêche cloud-init de remettre
+    # le nom AWS (ip-172-...) au redémarrage.
+    hostnamectl set-hostname "$name"
+    if [[ -d /etc/cloud/cloud.cfg.d ]]; then
+        printf 'preserve_hostname: true\nmanage_etc_hosts: false\n' \
+            > /etc/cloud/cloud.cfg.d/99-proxmox-hostname.cfg
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Étape 1 : installation de Proxmox (avec redémarrage)
 # -----------------------------------------------------------------------------
 start() {
@@ -112,6 +147,7 @@ start() {
         exit 0
     fi
 
+    choose_node_name "${1:-}"
     prepare_scripts
     touch "$SUITE_PENDING"
     install_suite_service
@@ -193,7 +229,7 @@ suite() {
 }
 
 case "${1:-}" in
-    --suite) suite ;;
-    "")      start ;;
-    *)       die "Option inconnue : $1 (usage : sudo bash $0)" ;;
+    --suite)   suite ;;
+    -h|--help) echo "Usage : sudo bash $0 [nom_du_noeud]   (défaut : ${DEFAULT_NODE_NAME})" ;;
+    *)         start "${1:-}" ;;
 esac
